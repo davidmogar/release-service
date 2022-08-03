@@ -20,6 +20,7 @@ import (
 	"github.com/redhat-appstudio/release-service/metrics"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 	"time"
 )
 
@@ -137,6 +138,7 @@ func (r *Release) MarkFailed(reason ReleaseReason, message string) {
 	}
 
 	r.Status.CompletionTime = &metav1.Time{Time: time.Now()}
+	klog.Info("MarkFailed ", r.Status.CompletionTime)
 	r.setStatusConditionWithMessage(metav1.ConditionFalse, reason, message)
 
 	go metrics.RegisterCompletedRelease(reason.String(), r.Status.ReleaseStrategy, r.Status.TargetWorkspace,

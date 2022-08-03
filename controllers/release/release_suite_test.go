@@ -19,13 +19,13 @@ package release
 import (
 	"context"
 	"go/build"
+	"k8s.io/client-go/rest"
 	"path/filepath"
 	"testing"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,19 +41,16 @@ import (
 )
 
 const (
-	testApiVersion            = "appstudio.redhat.com/v1alpha1"
-	testNamespace             = "default"
-	testPersistentVolumeClaim = "test-volume"
-	testServiceAccountName    = "test-account"
+	testApiVersion = "appstudio.redhat.com/v1alpha1"
+	testNamespace  = "default"
 )
 
 var (
-	cfg         *rest.Config
-	k8sManager  ctrl.Manager
-	cacheClient client.Client
-	testEnv     *envtest.Environment
-	ctx         context.Context
-	cancel      context.CancelFunc
+	cfg       *rest.Config
+	k8sClient client.Client
+	testEnv   *envtest.Environment
+	ctx       context.Context
+	cancel    context.CancelFunc
 )
 
 func TestControllersRelease(t *testing.T) {
@@ -84,40 +81,27 @@ var _ = BeforeSuite(func() {
 	}
 
 	var err error
-	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
 	Expect(err).NotTo(HaveOccurred())
 	Expect(cfg).NotTo(BeNil())
 
-	err = appstudiov1alpha1.AddToScheme(clientsetscheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
+	Expect(appstudiov1alpha1.AddToScheme(clientsetscheme.Scheme)).To(Succeed())
+	Expect(tektonv1beta1.AddToScheme(clientsetscheme.Scheme)).To(Succeed())
+	Expect(appstudioshared.AddToScheme(clientsetscheme.Scheme)).To(Succeed())
 
-	err = tektonv1beta1.AddToScheme(clientsetscheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	err = appstudioshared.AddToScheme(clientsetscheme.Scheme)
-	Expect(err).NotTo(HaveOccurred())
-
-	//webhookInstallOptions := &testEnv.WebhookInstallOptions
-
-	k8sManager, _ = ctrl.NewManager(cfg, ctrl.Options{
+	k8sManager, _ := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:             clientsetscheme.Scheme,
 		MetricsBindAddress: "0", // this disables metrics
 		LeaderElection:     false,
 	})
 
-	cacheClient = k8sManager.GetClient()
+	k8sClient = k8sManager.GetClient()
 	go func() {
 		defer GinkgoRecover()
-
-		err := setupCache(k8sManager)
-		Expect(err).ToNot(HaveOccurred())
-
-		err = k8sManager.Start(ctx)
-		Expect(err).ToNot(HaveOccurred())
+		Expect(setupCache(k8sManager)).To(Succeed())
+		Expect(k8sManager.Start(ctx)).To(Succeed())
 	}()
-
-}, 60)
+})
 
 var _ = AfterSuite(func() {
 	cancel()

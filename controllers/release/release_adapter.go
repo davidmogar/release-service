@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/klog/v2"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -68,12 +69,14 @@ func (a *Adapter) EnsureFinalizersAreCalled() (results.OperationResult, error) {
 
 	if controllerutil.ContainsFinalizer(a.release, finalizerName) {
 		if err := a.finalizeRelease(); err != nil {
+			klog.Info("Failed calling function")
 			return results.RequeueWithError(err)
 		}
 
 		controllerutil.RemoveFinalizer(a.release, finalizerName)
 		err := a.client.Update(a.context, a.release)
 		if err != nil {
+			klog.Info("Failed updating")
 			return results.RequeueWithError(err)
 		}
 	}
@@ -115,14 +118,16 @@ func (a *Adapter) EnsureReleasePipelineRunExists() (results.OperationResult, err
 	if pipelineRun == nil {
 		releaseStrategy, err = a.getReleaseStrategyFromRelease()
 		if err != nil {
+			patch := client.MergeFrom(a.release.DeepCopy())
 			a.release.MarkInvalid(v1alpha1.ReleaseReasonValidationError, err.Error())
-			return results.RequeueOnErrorOrStop(a.updateStatus())
+			return results.RequeueOnErrorOrStop(a.updateStatus(patch))
 		}
 
 		applicationSnapshot, err := a.getApplicationSnapshot()
 		if err != nil {
+			patch := client.MergeFrom(a.release.DeepCopy())
 			a.release.MarkInvalid(v1alpha1.ReleaseReasonValidationError, err.Error())
-			return results.RequeueOnErrorOrStop(a.updateStatus())
+			return results.RequeueOnErrorOrStop(a.updateStatus(patch))
 		}
 
 		pipelineRun, err = a.createReleasePipelineRun(releaseStrategy, applicationSnapshot)
@@ -267,6 +272,7 @@ func (a *Adapter) getReleaseStrategy(releaseLink *v1alpha1.ReleaseLink) (*v1alph
 func (a *Adapter) getReleaseStrategyFromRelease() (*v1alpha1.ReleaseStrategy, error) {
 	targetReleaseLink, err := a.getTargetReleaseLink()
 	if err != nil {
+		klog.Info("AQUI: ", err)
 		return nil, err
 	}
 
@@ -307,6 +313,7 @@ func (a *Adapter) getTargetReleaseLink() (*v1alpha1.ReleaseLink, error) {
 // started/succeeded, no action will be taken.
 func (a *Adapter) registerReleasePipelineRunStatus(pipelineRun *v1beta1.PipelineRun) error {
 	if pipelineRun != nil && pipelineRun.IsDone() {
+		patch := client.MergeFrom(a.release.DeepCopy())
 		a.release.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 
 		condition := pipelineRun.Status.GetCondition(apis.ConditionSucceeded)
@@ -316,7 +323,7 @@ func (a *Adapter) registerReleasePipelineRunStatus(pipelineRun *v1beta1.Pipeline
 			a.release.MarkFailed(v1alpha1.ReleaseReasonPipelineFailed, condition.Message)
 		}
 
-		return a.updateStatus()
+		return a.updateStatus(patch)
 	}
 
 	return nil
@@ -328,6 +335,8 @@ func (a *Adapter) registerReleaseStatusData(releasePipelineRun *v1beta1.Pipeline
 		return nil
 	}
 
+	patch := client.MergeFrom(a.release.DeepCopy())
+
 	a.release.Status.ReleasePipelineRun = fmt.Sprintf("%s%c%s",
 		releasePipelineRun.Namespace, types.Separator, releasePipelineRun.Name)
 	a.release.Status.ReleaseStrategy = fmt.Sprintf("%s%c%s",
@@ -336,10 +345,10 @@ func (a *Adapter) registerReleaseStatusData(releasePipelineRun *v1beta1.Pipeline
 
 	a.release.MarkRunning()
 
-	return a.updateStatus()
+	return a.updateStatus(patch)
 }
 
 // updateStatus updates the status of the Release being processed.
-func (a *Adapter) updateStatus() error {
-	return a.client.Status().Update(a.context, a.release)
+func (a *Adapter) updateStatus(patch client.Patch) error {
+	return a.client.Status().Patch(a.context, a.release, patch)
 }

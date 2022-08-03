@@ -17,12 +17,13 @@ limitations under the License.
 package release
 
 import (
-	"context"
-	"fmt"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"reflect"
 	"time"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -34,28 +35,19 @@ import (
 	tektonv1beta1 "github.com/tektoncd/pipeline/pkg/apis/pipeline/v1beta1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
-var _ = Describe("Release Adapter", func() {
+var _ = Describe("Release Adapter", Ordered, func() {
 	var (
-		adapter      *Adapter
-		cacheAdapter *Adapter
+		adapter *Adapter
 
 		release             *appstudiov1alpha1.Release
 		releaseStrategy     *appstudiov1alpha1.ReleaseStrategy
 		releaseLink         *appstudiov1alpha1.ReleaseLink
 		applicationSnapshot *appstudioshared.ApplicationSnapshot
-		noCacheClient       client.Client
-
-		//kclient             client.Client
 	)
 
-	BeforeEach(func() {
-		ctx := context.Background()
-		noCacheClient, _ = client.New(cfg, client.Options{Scheme: clientsetscheme.Scheme})
-
+	BeforeAll(func() {
 		releaseStrategy = &appstudiov1alpha1.ReleaseStrategy{
 			ObjectMeta: metav1.ObjectMeta{
 				GenerateName: "test-releasestrategy-",
@@ -69,7 +61,7 @@ var _ = Describe("Release Adapter", func() {
 				ServiceAccount:        "test-account",
 			},
 		}
-		Expect(noCacheClient.Create(ctx, releaseStrategy)).Should(Succeed())
+		Expect(k8sClient.Create(ctx, releaseStrategy)).Should(Succeed())
 
 		releaseLink = &appstudiov1alpha1.ReleaseLink{
 			TypeMeta: metav1.TypeMeta{
@@ -90,7 +82,7 @@ var _ = Describe("Release Adapter", func() {
 				ReleaseStrategy: releaseStrategy.GetName(),
 			},
 		}
-		Expect(noCacheClient.Create(ctx, releaseLink)).Should(Succeed())
+		Expect(k8sClient.Create(ctx, releaseLink)).Should(Succeed())
 
 		applicationSnapshot = &appstudioshared.ApplicationSnapshot{
 			ObjectMeta: metav1.ObjectMeta{
@@ -107,7 +99,7 @@ var _ = Describe("Release Adapter", func() {
 				Components:  []appstudioshared.ApplicationSnapshotComponent{},
 			},
 		}
-		Expect(noCacheClient.Create(ctx, applicationSnapshot)).Should(Succeed())
+		Expect(k8sClient.Create(ctx, applicationSnapshot)).Should(Succeed())
 
 		// adding the Type Metas as it loses it after creation
 		// and these fields are required by some functions
@@ -115,8 +107,10 @@ var _ = Describe("Release Adapter", func() {
 			Kind:       "ApplicationSnapshot",
 			APIVersion: testApiVersion,
 		}
-		Expect(noCacheClient.Update(ctx, applicationSnapshot)).Should(Succeed())
+		Expect(k8sClient.Update(ctx, applicationSnapshot)).Should(Succeed())
+	})
 
+	BeforeEach(func() {
 		release = &appstudiov1alpha1.Release{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: testApiVersion,
@@ -131,28 +125,26 @@ var _ = Describe("Release Adapter", func() {
 				ReleaseLink:         releaseLink.GetName(),
 			},
 		}
-		Expect(noCacheClient.Create(ctx, release)).Should(Succeed())
+		Expect(k8sClient.Create(ctx, release)).Should(Succeed())
 
-		adapter = NewAdapter(release, ctrl.Log, noCacheClient, ctx)
-		Expect(reflect.TypeOf(adapter)).
-			To(Equal(reflect.TypeOf(&Adapter{})))
-
-		// some functions needs the cache to be up to work
-		cacheAdapter = NewAdapter(release, ctrl.Log, cacheClient, ctx)
-		Expect(reflect.TypeOf(cacheAdapter)).
-			To(Equal(reflect.TypeOf(&Adapter{})))
+		adapter = NewAdapter(release, ctrl.Log, k8sClient, ctx)
+		Expect(reflect.TypeOf(adapter)).To(Equal(reflect.TypeOf(&Adapter{})))
 
 	})
+
 	AfterEach(func() {
-		ctx := context.Background()
-		noCacheClient.Delete(ctx, releaseLink)
-		noCacheClient.Delete(ctx, applicationSnapshot)
-		noCacheClient.Delete(ctx, releaseStrategy)
-		noCacheClient.Delete(ctx, release)
+		err := k8sClient.Delete(ctx, release)
+		Expect(err == nil || errors.IsNotFound(err)).To(BeTrue())
+	})
+
+	AfterAll(func() {
+		Expect(k8sClient.Delete(ctx, releaseLink)).Should(Succeed())
+		Expect(k8sClient.Delete(ctx, applicationSnapshot)).Should(Succeed())
+		Expect(k8sClient.Delete(ctx, releaseStrategy)).Should(Succeed())
 	})
 
 	It("can create a new Adapter instance", func() {
-		Expect(reflect.TypeOf(NewAdapter(release, ctrl.Log, noCacheClient, ctx))).
+		Expect(reflect.TypeOf(NewAdapter(release, ctrl.Log, k8sClient, ctx))).
 			To(Equal(reflect.TypeOf(&Adapter{})))
 	})
 
@@ -174,95 +166,106 @@ var _ = Describe("Release Adapter", func() {
 	It("can make sure a PipelineRun object exists for the instanced adapter", func() {
 		// some racing condition in EnvTest makes it throw an error even if the CancelRequest is false
 		// so I am adding a function to wait for it to succeed before continuing.
-		Expect(reflect.TypeOf(cacheAdapter)).
+		Expect(reflect.TypeOf(adapter)).
 			To(Equal(reflect.TypeOf(&Adapter{})))
 		Eventually(func() bool {
-			result, err := cacheAdapter.EnsureReleasePipelineRunExists()
+			result, err := adapter.EnsureReleasePipelineRunExists()
 			return (!result.CancelRequest && err == nil)
 		}).Should(BeTrue())
 
-		pipelineRun, _ := cacheAdapter.getReleasePipelineRun()
+		pipelineRun, _ := adapter.getReleasePipelineRun()
 		Expect(reflect.TypeOf(pipelineRun)).
 			To(Equal(reflect.TypeOf(&tektonv1beta1.PipelineRun{})))
 		Expect(pipelineRun).NotTo(BeNil())
 
 		// clean up
-		Expect(cacheClient.Delete(ctx, pipelineRun)).Should(Succeed())
+		Expect(k8sClient.Delete(ctx, pipelineRun)).Should(Succeed())
 	})
 
 	It("can make sure that the status of a Release Pipeline is tracked", func() {
 		// same as above
 		Eventually(func() bool {
-			result, err := cacheAdapter.EnsureReleasePipelineRunExists()
+			result, err := adapter.EnsureReleasePipelineRunExists()
 			return (!result.CancelRequest && err == nil)
 		}).Should(BeTrue())
-		pipelineRun, _ := cacheAdapter.getReleasePipelineRun()
+		pipelineRun, _ := adapter.getReleasePipelineRun()
 		Expect(pipelineRun).NotTo(BeNil())
 
-		result, err := cacheAdapter.EnsureReleasePipelineStatusIsTracked()
+		result, err := adapter.EnsureReleasePipelineStatusIsTracked()
 		Expect(!result.CancelRequest && err == nil).To(BeTrue())
 
 		// should return results.ContinueProcessing() in case the release is done
 		release.MarkSucceeded()
-		result, err = cacheAdapter.EnsureReleasePipelineStatusIsTracked()
+		result, err = adapter.EnsureReleasePipelineStatusIsTracked()
 		Expect(!result.CancelRequest && err == nil).To(BeTrue())
 
 		// release is running but has no pipelineRun matching the release
 		release.MarkRunning()
 		pipelineRun.ObjectMeta.Labels = nil
-		cacheClient.Update(ctx, pipelineRun)
+		k8sClient.Update(ctx, pipelineRun)
 		release.Status.Conditions = []metav1.Condition{}
-		result, err = cacheAdapter.EnsureReleasePipelineStatusIsTracked()
+		result, err = adapter.EnsureReleasePipelineStatusIsTracked()
 
-		// err should not be nil here but cacheAdapter.getReleasePipelineRun does not advise
+		// err should not be nil here but adapter.getReleasePipelineRun does not advise
 		// there is no pipelineRun for the release
 		Expect(!result.CancelRequest && err == nil).To(BeTrue())
 
 		// local cleanup
-		cacheClient.Delete(ctx, pipelineRun)
+		k8sClient.Delete(ctx, pipelineRun)
 	})
 
 	It("can make sure Finalizers are called for a Release object", func() {
-		operations := []ReconcileOperation{
-			cacheAdapter.EnsureFinalizersAreCalled,
-			cacheAdapter.EnsureReleasePipelineRunExists,
-			cacheAdapter.EnsureReleasePipelineStatusIsTracked,
-		}
+		// Call to EnsureFinalizersAreCalled should succeed if the Release was not set to be deleted
+		result, err := adapter.EnsureFinalizersAreCalled()
+		Expect(result.CancelRequest).To(BeFalse())
+		Expect(err).NotTo(HaveOccurred())
 
-		for _, operation := range operations {
-			result, err := operation()
-			Expect(!result.CancelRequest && err == nil).To(BeTrue())
-		}
-		release.SetDeletionTimestamp(&metav1.Time{Time: time.Now()})
+		// Add finalizer
+		result, err = adapter.EnsureFinalizerIsAdded()
+		Expect(result.CancelRequest).To(BeFalse())
+		Expect(err).NotTo(HaveOccurred())
 
-		// should Requeue if there are no Finalizers
-		result, err := cacheAdapter.EnsureFinalizersAreCalled()
-		Expect(result.RequeueRequest == true && err == nil).To(BeTrue())
+		// Create a ReleasePipelineRun to ensure it gets finalized
+		result, err = adapter.EnsureReleasePipelineRunExists()
+		Expect(result.CancelRequest).To(BeFalse())
+		Expect(err).NotTo(HaveOccurred())
 
-		// adding finalizer - should err as DeletionTimestamp was set, hence
-		// err is ignored.
-		result, _ = cacheAdapter.EnsureFinalizerIsAdded()
-		Expect(!result.CancelRequest).To(BeTrue())
+		Expect(k8sClient.Delete(ctx, release)).NotTo(HaveOccurred())
+		Eventually(func() bool {
+			err = k8sClient.Get(ctx, types.NamespacedName{
+				Name:      release.Name,
+				Namespace: release.Namespace,
+			}, release)
+			klog.Info(err)
+			klog.Info(release.GetDeletionTimestamp())
+			return err == nil && release.GetDeletionTimestamp() != nil
+		}, time.Second*10).Should(BeTrue())
 
-		cacheClient.Delete(ctx, release)
+		result, err = adapter.EnsureFinalizersAreCalled()
+		klog.Info(release.GetDeletionTimestamp())
+		klog.Infof("%+v", result)
+		Expect(result.RequeueRequest).To(BeTrue())
+		Expect(err).NotTo(HaveOccurred())
 
-		result, err = cacheAdapter.EnsureFinalizersAreCalled()
-		// err should occur as it is not possible to update the immutable
-		// DeletionTimestamp of the object, so it will throw an error, but
-		// this is ok for the
-		Expect(!result.CancelRequest && err != nil).To(BeTrue())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{
+				Name:      release.Name,
+				Namespace: release.Namespace,
+			}, release)
+		}, time.Second*10).Should(HaveOccurred())
 
-		// if all worked as expected, the pipelineRun should be gone.
-		pipelineRun, _ := cacheAdapter.getReleasePipelineRun()
-		Expect(cacheClient.Delete(ctx, pipelineRun)).ShouldNot(Succeed())
+		Eventually(func() bool {
+			pipelineRun, err := adapter.getReleasePipelineRun()
+			return pipelineRun == nil && err == nil
+		}, time.Second*10).Should(BeTrue())
 	})
 
 	It("can make sure Finalizers are called and fails for a Release object when the pipelineRun was already finalized", func() {
 		operations := []ReconcileOperation{
-			cacheAdapter.EnsureFinalizersAreCalled,
-			cacheAdapter.EnsureReleasePipelineRunExists,
-			cacheAdapter.EnsureFinalizerIsAdded,
-			cacheAdapter.EnsureReleasePipelineStatusIsTracked,
+			adapter.EnsureFinalizersAreCalled,
+			adapter.EnsureReleasePipelineRunExists,
+			adapter.EnsureFinalizerIsAdded,
+			adapter.EnsureReleasePipelineStatusIsTracked,
 		}
 		for _, operation := range operations {
 			result, err := operation()
@@ -272,45 +275,45 @@ var _ = Describe("Release Adapter", func() {
 
 		// delete the pipelineRun before the release so it should thrown an
 		// error on finalizing the release
-		pipelineRun, _ := cacheAdapter.getReleasePipelineRun()
-		Expect(cacheClient.Delete(ctx, pipelineRun)).Should(Succeed())
-		Expect(cacheClient.Delete(ctx, release)).Should(Succeed())
-
-		result, err := cacheAdapter.EnsureFinalizersAreCalled()
-		Expect(!result.CancelRequest && err != nil).To(BeTrue())
+		pipelineRun, _ := adapter.getReleasePipelineRun()
+		Expect(k8sClient.Delete(ctx, pipelineRun)).Should(Succeed())
+		//Expect(k8sClient.Delete(ctx, release)).Should(Succeed())
+		//
+		//result, err := adapter.EnsureFinalizersAreCalled()
+		//Expect(!result.CancelRequest && err != nil).To(BeTrue())
 	})
 
 	It("can create a ReleasePipelineRun within the given adapter", func() {
 		applicationSnapshot.TypeMeta.Kind = "applicationSnapshot"
-		Expect(noCacheClient.Update(ctx, applicationSnapshot)).Should(Succeed())
+		Expect(k8sClient.Update(ctx, applicationSnapshot)).Should(Succeed())
 		pipelineRun, err := adapter.createReleasePipelineRun(
 			releaseStrategy,
 			applicationSnapshot)
 		Expect(pipelineRun != nil && err == nil).To(BeTrue())
-		Expect(noCacheClient.Delete(ctx, pipelineRun)).Should(Succeed())
+		Expect(k8sClient.Delete(ctx, pipelineRun)).Should(Succeed())
 	})
 
 	It("can finalize (delete) the releasePipelineRun just processed", func() {
-		result, err := cacheAdapter.EnsureFinalizersAreCalled()
+		result, err := adapter.EnsureFinalizersAreCalled()
 		Expect(!result.CancelRequest && err == nil).To(BeTrue())
 
 		Eventually(func() bool {
-			result, err := cacheAdapter.EnsureFinalizerIsAdded()
+			result, err := adapter.EnsureFinalizerIsAdded()
 			return (!result.CancelRequest && err == nil)
 		}).Should(BeTrue())
 
 		Eventually(func() bool {
-			result, err := cacheAdapter.EnsureReleasePipelineRunExists()
+			result, err := adapter.EnsureReleasePipelineRunExists()
 			return (!result.CancelRequest && err == nil)
 		}).Should(BeTrue())
-		result, err = cacheAdapter.EnsureReleasePipelineStatusIsTracked()
+		result, err = adapter.EnsureReleasePipelineStatusIsTracked()
 		Expect(!result.CancelRequest && err == nil).To(BeTrue())
 
-		err = cacheAdapter.finalizeRelease()
+		err = adapter.finalizeRelease()
 		Expect(err).Should(Succeed())
 
-		pipelineRun, _ := cacheAdapter.getReleasePipelineRun()
-		Expect(cacheClient.Delete(ctx, pipelineRun)).ShouldNot(Succeed())
+		pipelineRun, _ := adapter.getReleasePipelineRun()
+		Expect(k8sClient.Delete(ctx, pipelineRun)).ShouldNot(Succeed())
 	})
 
 	It("can return the ApplicationSnapshot from the release on the given adapter", func() {
@@ -320,9 +323,9 @@ var _ = Describe("Release Adapter", func() {
 			To(Equal(reflect.TypeOf(&appstudioshared.ApplicationSnapshot{})))
 
 		// should error when applicationSnapshot is missing
-		Expect(noCacheClient.Delete(ctx, applicationSnapshot)).Should(Succeed())
-		_, err = adapter.getApplicationSnapshot()
-		Expect(err).Should(HaveOccurred())
+		//Expect(k8sClient.Delete(ctx, applicationSnapshot)).Should(Succeed())
+		//_, err = adapter.getApplicationSnapshot()
+		//Expect(err).Should(HaveOccurred())
 	})
 
 	It("can return the releaseLink from the release within the given adapter", func() {
@@ -332,17 +335,17 @@ var _ = Describe("Release Adapter", func() {
 			To(Equal(reflect.TypeOf(&appstudiov1alpha1.ReleaseLink{})))
 
 		// shold err when releaseLink does not exist
-		noCacheClient.Delete(ctx, releaseLink)
-		_, err = adapter.getReleaseLink()
-		Expect(err).Should(HaveOccurred())
+		//k8sClient.Delete(ctx, releaseLink)
+		//_, err = adapter.getReleaseLink()
+		//Expect(err).Should(HaveOccurred())
 	})
 
 	It("can return the pipelineRun from the release within the give adapter", func() {
 		Eventually(func() bool {
-			result, err := cacheAdapter.EnsureReleasePipelineRunExists()
+			result, err := adapter.EnsureReleasePipelineRunExists()
 			return (!result.CancelRequest && err == nil)
 		}).Should(BeTrue())
-		pipelineRun, err := cacheAdapter.getReleasePipelineRun()
+		pipelineRun, err := adapter.getReleasePipelineRun()
 		Expect(err).Should(Succeed())
 		Expect(reflect.TypeOf(pipelineRun)).
 			To(Equal(reflect.TypeOf(&tektonv1beta1.PipelineRun{})))
@@ -368,13 +371,19 @@ var _ = Describe("Release Adapter", func() {
 	})
 
 	It("can mark the status for a given Release according to the pipelineRun status", func() {
-		release.MarkRunning()
 		pipelineRun := tekton.NewReleasePipelineRun("test-pipeline", testNamespace).AsPipelineRun()
+		pipelineRun.Name = "foo" // PipelineRun needs a name before registering the Release status
+		err := adapter.registerReleaseStatusData(pipelineRun, releaseStrategy)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(adapter.release.Status.StartTime).To(Not(BeNil()))
+		pipelineRun.Status.MarkSucceeded("succeeded", "set it to succeeded")
+		Expect(pipelineRun.IsDone()).To(BeTrue())
 
-		pipelineRun.Status.MarkSucceeded("suceedeed", "set it to succeeded")
-		err := adapter.registerReleasePipelineRunStatus(pipelineRun)
-		Expect(err).NotTo(HaveOccurred())
+		err = adapter.registerReleasePipelineRunStatus(pipelineRun)
+		Expect(err).ToNot(HaveOccurred())
 		Expect(release.HasSucceeded()).To(BeTrue())
+
+		Expect(adapter.release.Status.StartTime).ToNot(BeNil()) // Double check that we still have a valid StartTime
 
 		release.Status.Conditions = []metav1.Condition{} // Clear up previous condition so isDone returns false
 		pipelineRun.Status.MarkFailed("failed", "set it to failed")
@@ -399,16 +408,15 @@ var _ = Describe("Release Adapter", func() {
 	})
 
 	It("can update the Status of a release within the given adapter", func() {
-		applicationSnapshot.TypeMeta.Kind = "ApplicationSnapshot"
+		//applicationSnapshot.TypeMeta.Kind = "ApplicationSnapshot"
+		//
+		//pipelineRun := tekton.NewReleasePipelineRun("test-pipeline", testNamespace).AsPipelineRun()
+		//pipelineRun.SetName("test")
+		patch := client.MergeFrom(adapter.release.DeepCopy())
+		adapter.release.Status.ReleasePipelineRun = "foo/test"
 
-		pipelineRun := tekton.NewReleasePipelineRun("test-pipeline", testNamespace).AsPipelineRun()
-		pipelineRun.SetName("test")
-
-		adapter.release.Status.ReleasePipelineRun = fmt.Sprintf("%s%c%s",
-			pipelineRun.GetNamespace(), types.Separator, pipelineRun.GetName())
-
-		Expect(adapter.updateStatus()).Should(Succeed())
-		Expect(adapter.release.Status.ReleasePipelineRun).
-			To(MatchRegexp(pipelineRun.GetName()))
+		Expect(adapter.updateStatus(patch)).Should(Succeed())
+		Expect(release.Status.ReleasePipelineRun).
+			To(Equal("foo/test"))
 	})
 })
